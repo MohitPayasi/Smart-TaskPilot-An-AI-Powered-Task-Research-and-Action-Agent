@@ -1,0 +1,6 @@
+Flask>=3.0
+langchain>=1.0
+langchain-groq
+langgraph
+pydantic>=2
+python-dotenv

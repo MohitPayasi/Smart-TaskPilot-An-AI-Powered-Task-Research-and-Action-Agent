@@ -1,0 +1,31 @@
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+Day*/venv/
+
+# Environment variables & API keys (CRITICAL: NEVER COMMIT KEYS)
+.env
+*.env
+.env.*
+!.env.example
+
+# Python bytecode and caches
+__pycache__/
+*/__pycache__/
+*/*/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Task output artifacts
+taskpilot_outputs/
+Day*/taskpilot_outputs/
+*.log
+
+# Editor & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

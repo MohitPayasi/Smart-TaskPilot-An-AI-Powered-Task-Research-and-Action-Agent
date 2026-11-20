@@ -1,0 +1,141 @@
+
+const statusBox = document.getElementById("status");
+const outputBox = document.getElementById("output");
+
+function esc(value) {
+    return String(value ?? "").replace(/[&<>"']/g, char => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+    }[char]));
+}
+
+function status(message, type = "") {
+    statusBox.textContent = message;
+    statusBox.className = "status " + type;
+}
+
+function busy(value) {
+    document.querySelectorAll("button").forEach(button => {
+        button.disabled = value;
+    });
+}
+
+async function post(url, body) {
+    const response = await fetch(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body)
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        throw new Error(data.error || "Request failed");
+    }
+
+    return data;
+}
+
+function renderPlan(plan) {
+    let html = `<h3>Goal</h3><p>${esc(plan.goal)}</p>`;
+    html += `<p class="meta">Total time: ${esc(plan.total_estimated_minutes)} minutes</p>`;
+    html += "<h3>Execution Steps</h3>";
+
+    (plan.steps || []).forEach(step => {
+        html += `
+            <div class="task">
+                <strong>${esc(step.step_number)}. ${esc(step.title)}</strong>
+                <div>${esc(step.description)}</div>
+                <div class="meta">Time: ${esc(step.estimated_minutes)} minutes</div>
+                <div class="meta">Expected: ${esc(step.expected_output)}</div>
+            </div>
+        `;
+    });
+
+    html += "<h3>Assumptions</h3><ul>";
+    (plan.assumptions || []).forEach(item => {
+        html += `<li>${esc(item)}</li>`;
+    });
+    html += "</ul><h3>Success Criteria</h3><ul>";
+
+    (plan.success_criteria || []).forEach(item => {
+        html += `<li>${esc(item)}</li>`;
+    });
+
+    html += "</ul>";
+    outputBox.innerHTML = html;
+}
+
+async function generatePlan() {
+    const task = document.getElementById("task").value.trim();
+
+    if (task.length < 3) {
+        return status("Enter at least 3 characters.", "error");
+    }
+
+    busy(true);
+    status("Generating task plan...");
+
+    try {
+        const data = await post("/api/plan", {request: task});
+        renderPlan(data.plan);
+        status("Plan generated successfully.", "success");
+    } catch (error) {
+        status(error.message, "error");
+    } finally {
+        busy(false);
+    }
+}
+
+async function runAgent() {
+    const task = document.getElementById("task").value.trim();
+
+    if (task.length < 3) {
+        return status("Enter at least 3 characters.", "error");
+    }
+
+    busy(true);
+    status("Agent is planning and executing tools...");
+
+    try {
+        const data = await post("/api/run", {request: task});
+
+        renderPlan(data.plan);
+
+        outputBox.innerHTML += "<h3>Executed Tools</h3>";
+
+        if (data.executed_tools.length) {
+            data.executed_tools.forEach(tool => {
+                outputBox.innerHTML += `<div class="task">${esc(tool)}</div>`;
+            });
+        } else {
+            outputBox.innerHTML += "<p>No tools executed.</p>";
+        }
+
+        outputBox.innerHTML += "<h3>Tool Outputs</h3>";
+
+        data.tool_outputs.forEach(item => {
+            outputBox.innerHTML += `
+                <div class="task">
+                    <strong>${esc(item.tool)}</strong>
+                    <p>${esc(item.output)}</p>
+                </div>
+            `;
+        });
+
+        outputBox.innerHTML += `
+            <h3>Final Review</h3>
+            <div class="task">${esc(data.review)}</div>
+        `;
+
+        status("Agent execution completed.", "success");
+
+    } catch (error) {
+        status(error.message, "error");
+    } finally {
+        busy(false);
+    }
+}
