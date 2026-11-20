@@ -103,8 +103,7 @@ def get_llm():
     llm = ChatGroq(
         model=model_name,
         temperature=0,
-        api_key=api_key
-    )
+        api_key=api_key)
 
     return llm
 
@@ -226,9 +225,7 @@ def create_plan():
 
             TaskPlan,
 
-            method="json_mode"
-
-        )
+            method="json_mode")
 
 
         # Create LangChain Pipeline
@@ -266,15 +263,14 @@ def create_plan():
         # Log complete error in terminal
 
         app.logger.exception(
-            "TaskPilot plan generation failed"
-        )
+            "TaskPilot plan generation failed")
 
 
         # Return error response
 
         return jsonify({
 
-            "status": "error",
+"status": "error",
 
             "error": str(exc)
 
@@ -287,12 +283,4 @@ def create_plan():
 
 if __name__ == "__main__":
 
-    app.run(
-
-        host="127.0.0.1",
-
-        port=5000,
-
-        debug=True
-
-    )
+    app.run(host="127.0.0.1",port=5000,debug=True)

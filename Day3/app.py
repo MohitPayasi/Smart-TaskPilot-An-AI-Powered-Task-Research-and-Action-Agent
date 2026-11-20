@@ -1,359 +1,573 @@
-
-import os
-import re
 import ast
 import json
 import operator
+import os
+import re
 import uuid
-
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
+from langchain_groq import ChatGroq
 
-from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import interrupt, Command
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 
-# 1. APPLICATION SETUP
+# ============================================================
+# 1. CONFIGURATION
+# ============================================================
 
 load_dotenv()
+
 app = Flask(__name__)
 OUTPUT_DIR = Path("taskpilot_outputs")
-OUTPUT_DIR.mkdir(exist_ok=True)
-memory = MemorySaver()
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# One shared checkpointer is essential: /api/run and /api/approve
+# must access the same saved graph state.
+checkpointer = MemorySaver()
 
 
-# 2. PYDANTIC MODELS
+def get_llm() -> ChatGroq:
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is missing. Add it to your .env file.")
+    return ChatGroq(
+        model=GROQ_MODEL,
+        temperature=0,
+        api_key=GROQ_API_KEY,
+    )
+
+
+# ============================================================
+# 2. PYDANTIC OUTPUT MODELS
+# ============================================================
 
 class TaskStep(BaseModel):
     step_number: int
     title: str
     description: str
-    estimated_minutes: int = Field(ge=1)
-    expected_output: str
+    estimated_minutes: int = Field(default=5, ge=1)
+    expected_output: str = "Step result"
 
 
 class TaskPlan(BaseModel):
     goal: str
     assumptions: list[str] = Field(default_factory=list)
-    steps: list[TaskStep]
-    total_estimated_minutes: int = Field(ge=1)
+    steps: list[TaskStep] = Field(min_length=1)
+    total_estimated_minutes: int = Field(default=1, ge=1)
     success_criteria: list[str] = Field(default_factory=list)
 
 
-# 3. LANGGRAPH STATE
+class ReportTable(BaseModel):
+    section: str
+    headers: list[str] = Field(min_length=1)
+    rows: list[list[str]] = Field(default_factory=list)
+
+
+class FinalReport(BaseModel):
+    title: str = "TaskPilot Final Review"
+    status: str = "completed"
+    tables: list[ReportTable] = Field(min_length=1)
+
 
 class AgentState(TypedDict, total=False):
     user_request: str
     plan: dict
     approved: bool
-    tool_outputs: list
+    tool_outputs: list[dict]
+    report: dict
     review: str
     status: str
 
 
-# 4. GROQ LLM
+# ============================================================
+# 3. SAFE JSON HELPERS
+# ============================================================
 
-def get_llm():
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise RuntimeError("GROQ_API_KEY is missing from .env")
-    return ChatGroq(model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"), temperature=0, api_key=api_key)
-
-
-# 5. PLAN GENERATOR
-
-def generate_plan(user_request):
-    llm = get_llm()
-    planner = llm.bind(response_format={"type": "json_object"})
-    prompt = [
-        SystemMessage(content=f"""
-            You are TaskPilot Planner.
-            Create a practical and detailed task plan.
-            Return valid JSON only.
-            Follow this schema:
-            {json.dumps(TaskPlan.model_json_schema())}
-            Every step must be a JSON object.
-            Never return Markdown or plain string steps.
-            Do not execute tasks.
-        """),
-        HumanMessage(content=user_request)
-    ]
-    response = planner.invoke(prompt)
-    content = response.content
+def response_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
     if isinstance(content, list):
-        content = "".join(str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in content)
-    content = str(content).strip()
-    start = content.find("{")
-    end = content.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError("Planner did not return valid JSON.")
-    data = json.loads(content[start:end + 1])
-    steps = []
-    for index, step in enumerate(data.get("steps", []), start=1):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    return str(content)
+
+
+def parse_json_object(content: Any) -> dict:
+    raw = response_text(content).strip()
+    # Remove optional Markdown fences if the model adds them.
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s*```$", "", raw)
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError(f"Model did not return a JSON object: {raw[:500]}")
+    value = json.loads(raw[start:end + 1])
+    if not isinstance(value, dict):
+        raise ValueError("Expected a JSON object.")
+    return value
+
+
+# ============================================================
+# 4. PLANNER
+# ============================================================
+
+def generate_plan(user_request: str) -> dict:
+    llm = get_llm().bind(response_format={"type": "json_object"})
+
+    messages = [
+        SystemMessage(content=f"""
+You are TaskPilot's planning agent.
+Create a useful, realistic plan for the user's request.
+The request can be a question, calculation, explanation, analysis,
+learning plan, workshop, writing task, or file-related task.
+
+Return ONLY a JSON object matching this schema:
+{json.dumps(TaskPlan.model_json_schema(), ensure_ascii=False)}
+
+Rules:
+- Make steps specific to the user's actual request.
+- Do not claim that any step has already been executed.
+- For a simple question, use a short plan.
+- For a complex task, provide enough detail to make the plan actionable.
+- Do not invent missing user-specific facts. Put necessary assumptions in assumptions.
+- Estimated minutes must be positive integers.
+- Every step must be an object.
+"""),
+        HumanMessage(content=user_request),
+    ]
+
+    data = parse_json_object(llm.invoke(messages).content)
+
+    # Normalize common model omissions before strict Pydantic validation.
+    normalized_steps = []
+    for i, step in enumerate(data.get("steps", []), start=1):
         if isinstance(step, str):
-            step = {"title": f"Step {index}", "description": step}
-        if isinstance(step, dict):
-            steps.append({
-                "step_number": index,
-                "title": str(step.get("title", f"Step {index}")),
-                "description": str(step.get("description", "")),
-                "estimated_minutes": max(1, int(step.get("estimated_minutes", 5))),
-                "expected_output": str(step.get("expected_output", "Step completed"))
-            })
-    if not steps:
-        steps = [{"step_number": 1, "title": "Complete task", "description": user_request, "estimated_minutes": 5, "expected_output": "Task completed"}]
-    data["steps"] = steps
-    data["goal"] = str(data.get("goal", user_request))
-    data["assumptions"] = data.get("assumptions", [])
-    data["success_criteria"] = data.get("success_criteria", ["Complete the requested task"])
-    data["total_estimated_minutes"] = max(1, int(data.get("total_estimated_minutes") or sum(step["estimated_minutes"] for step in steps)))
-    return TaskPlan.model_validate(data).model_dump()
+            step = {"title": f"Step {i}", "description": step}
+        if not isinstance(step, dict):
+            continue
+        normalized_steps.append({
+            "step_number": i,
+            "title": str(step.get("title") or f"Step {i}"),
+            "description": str(step.get("description") or ""),
+            "estimated_minutes": max(1, int(step.get("estimated_minutes") or 5)),
+            "expected_output": str(step.get("expected_output") or "Step result"),
+        })
+
+    if not normalized_steps:
+        normalized_steps = [{
+            "step_number": 1,
+            "title": "Prepare the response",
+            "description": user_request,
+            "estimated_minutes": 5,
+            "expected_output": "A response addressing the user's request",
+        }]
+
+    total = sum(s["estimated_minutes"] for s in normalized_steps)
+    normalized = {
+        "goal": str(data.get("goal") or user_request),
+        "assumptions": data.get("assumptions") or [],
+        "steps": normalized_steps,
+        "total_estimated_minutes": max(
+            1, int(data.get("total_estimated_minutes") or total)
+        ),
+        "success_criteria": data.get("success_criteria") or [
+            "The result addresses the user's original request."
+        ],
+    }
+
+    return TaskPlan.model_validate(normalized).model_dump()
 
 
-# 6. CALCULATOR TOOL
+# ============================================================
+# 5. TOOLS
+# ============================================================
 
 @tool
 def calculator(expression: str) -> str:
-    """Calculate basic mathematical expressions."""
-    operations = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv, ast.Pow: operator.pow, ast.USub: operator.neg}
-    def calculate(node):
+    """Evaluate a basic arithmetic expression. Supports +, -, *, /, ** and parentheses."""
+    allowed_ops = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.Pow: operator.pow,
+        ast.USub: operator.neg,
+        ast.UAdd: operator.pos,
+        ast.Mod: operator.mod,
+    }
+
+    def evaluate(node):
         if isinstance(node, ast.Constant) and type(node.value) in (int, float):
             return node.value
-        if isinstance(node, ast.BinOp) and type(node.op) in operations:
-            left = calculate(node.left)
-            right = calculate(node.right)
+        if isinstance(node, ast.BinOp) and type(node.op) in allowed_ops:
+            left, right = evaluate(node.left), evaluate(node.right)
             if isinstance(node.op, ast.Pow) and abs(right) > 8:
-                raise ValueError("Exponent too large")
-            result = operations[type(node.op)](left, right)
-            if abs(result) > 1e100:
-                raise ValueError("Result too large")
+                raise ValueError("Exponent is too large.")
+            result = allowed_ops[type(node.op)](left, right)
+            if not isinstance(result, (int, float)) or abs(result) > 1e100:
+                raise ValueError("Result is outside the allowed range.")
             return result
-        if isinstance(node, ast.UnaryOp) and type(node.op) in operations:
-            return operations[type(node.op)](calculate(node.operand))
-        raise ValueError("Invalid mathematical expression")
+        if isinstance(node, ast.UnaryOp) and type(node.op) in allowed_ops:
+            return allowed_ops[type(node.op)](evaluate(node.operand))
+        raise ValueError("Unsupported expression.")
+
+    if len(expression) > 200:
+        return "Error: expression is too long."
     try:
-        if len(expression) > 200:
-            raise ValueError("Expression too long")
-        return str(calculate(ast.parse(expression, mode="eval").body))
+        tree = ast.parse(expression, mode="eval")
+        return str(evaluate(tree.body))
     except Exception as exc:
         return f"Calculation error: {exc}"
 
 
-# 7. TEXT ANALYZER TOOL
-
 @tool
 def text_analyzer(text: str) -> str:
-    """Count words, characters and lines in text."""
-    words = len(text.split())
-    characters = len(text)
-    lines = len(text.splitlines()) or 1
-    return f"Words: {words}, Characters: {characters}, Lines: {lines}"
+    """Analyze supplied text and return word, character, and line counts."""
+    return json.dumps({
+        "words": len(text.split()),
+        "characters": len(text),
+        "lines": len(text.splitlines()) or 1,
+    })
 
-
-# 8. SAVE NOTE TOOL
 
 @tool
 def save_note(filename: str, content: str) -> str:
-    """Save a text report in the taskpilot_outputs folder."""
-    name = Path(filename).name
-    if not name or name in {".", ".."}:
-        return "Invalid filename"
-    if not name.endswith(".txt"):
-        name += ".txt"
-    folder = OUTPUT_DIR.resolve()
-    file_path = (folder / name).resolve()
-    if file_path.parent != folder:
-        return "Invalid file path"
+    """Save user-requested text content as a .txt file in taskpilot_outputs."""
+    safe_name = Path(filename).name
+    if not safe_name or safe_name in {".", ".."}:
+        return "Error: invalid filename."
+    if not safe_name.lower().endswith(".txt"):
+        safe_name += ".txt"
+
+    destination = (OUTPUT_DIR.resolve() / safe_name).resolve()
+    if destination.parent != OUTPUT_DIR.resolve():
+        return "Error: invalid output path."
+
     try:
-        file_path.write_text(content, encoding="utf-8")
-        return f"File saved successfully: {name}"
-    except Exception as exc:
-        return f"File saving error: {exc}"
+        destination.write_text(content, encoding="utf-8")
+        return f"Saved successfully: {destination.name}"
+    except OSError as exc:
+        return f"File save error: {exc}"
 
-
-# 9. REGISTER TOOLS
 
 TOOLS = [calculator, text_analyzer, save_note]
+TOOLS_BY_NAME = {item.name: item for item in TOOLS}
 
 
-# 10. EXECUTE TOOLS
+# ============================================================
+# 6. TOOL-CALLING EXECUTOR
+# ============================================================
 
-def execute_tools(user_request, plan):
-    outputs = []
-    text = user_request.lower()
-    numbers = re.findall(r"\d[\d,]*(?:\.\d+)?", user_request)
+def execute_request(user_request: str, plan: dict) -> list[dict]:
+    """
+    The model decides whether a tool is needed.
+    If no tool is needed, it can answer normally.
+    Tool execution is limited to the explicitly registered tools.
+    """
+    llm = get_llm().bind_tools(TOOLS)
+    messages = [
+        SystemMessage(content="""
+You are TaskPilot's execution agent.
 
-    # Detect student/laptop quantity and unit price
-    patterns = [
-        r"(\d[\d,]*)\s+(?:students|participants|people|laptops|computers|items).*?(?:pay(?:ing)?|cost(?:s|ing)?|priced at|each).*?(\d[\d,]*)",
-        r"(\d[\d,]*)\s+(?:students|participants|people|laptops|computers|items).*?each.*?(\d[\d,]*)"
+Help complete the user's original request using the approved plan.
+You may use only the tools provided to you:
+- calculator: arithmetic only
+- text_analyzer: analyze text supplied in the request
+- save_note: save content only when the user explicitly requests a file/note
+
+Important:
+- Do not call a tool just to appear busy.
+- Use calculator for calculations instead of mental arithmetic.
+- Use text_analyzer only when the user asks to analyze/count supplied text.
+- Use save_note only when the user asks to save/create a text file.
+- Do not claim to create Excel, PDF, Word, browse the web, send emails,
+  or perform external actions because no such tool is registered.
+- If the user asks a normal knowledge or writing question, answer it directly.
+- Follow the approved plan.
+"""),
+        HumanMessage(content=(
+            f"USER REQUEST:\n{user_request}\n\n"
+            f"APPROVED PLAN:\n{json.dumps(plan, ensure_ascii=False)}"
+        )),
     ]
 
-    calculation_done = False
+    outputs: list[dict] = []
 
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            expression = f"{match.group(1).replace(',', '')} * {match.group(2).replace(',', '')}"
-            result = calculator.invoke({"expression": expression})
-            outputs.append({"tool": "calculator", "input": expression, "output": result})
-            calculation_done = True
+    # Bounded tool loop prevents endless tool-calling.
+    for _ in range(6):
+        ai_message = llm.invoke(messages)
+        messages.append(ai_message)
+
+        calls = getattr(ai_message, "tool_calls", None) or []
+        if not calls:
+            outputs.append({
+                "type": "assistant_response",
+                "output": response_text(ai_message.content),
+            })
             break
 
-    # Detect training hours calculation
-    hours_match = re.search(r"(\d+)[ -]?day.*?(\d+)\s*hours?\s*(?:each day|per day)", text)
+        for call in calls:
+            name = call.get("name")
+            args = call.get("args") or {}
+            call_id = call.get("id")
 
-    if hours_match:
-        expression = f"{hours_match.group(1)} * {hours_match.group(2)}"
-        result = calculator.invoke({"expression": expression})
-        outputs.append({"tool": "calculator", "input": expression, "output": result})
-        calculation_done = True
+            if name not in TOOLS_BY_NAME:
+                result = f"Tool '{name}' is not available."
+            else:
+                try:
+                    result = TOOLS_BY_NAME[name].invoke(args)
+                except Exception as exc:
+                    result = f"Tool execution error: {exc}"
 
-    # Simple arithmetic fallback
-    if not calculation_done and len(numbers) >= 2 and any(word in text for word in ["calculate", "total cost", "total revenue", "multiply"]):
-        expression = f"{numbers[0].replace(',', '')} * {numbers[1].replace(',', '')}"
-        result = calculator.invoke({"expression": expression})
-        outputs.append({"tool": "calculator", "input": expression, "output": result})
-
-    # Generate report content
-    report = f"TaskPilot Report\n\nUser Request:\n{user_request}\n\nTask Plan:\n{json.dumps(plan, indent=2)}\n\nCalculation Results:\n{json.dumps(outputs, indent=2)}"
-
-    # Text analyzer
-    if any(word in text for word in ["analyze", "analyse", "word count", "count words", "text analysis"]):
-        result = text_analyzer.invoke({"text": report})
-        outputs.append({"tool": "text_analyzer", "input": "Generated task report", "output": result})
-
-    # Save report
-    if any(word in text for word in ["save", "create a file", "save it"]):
-        match = re.search(r"([a-zA-Z0-9_-]+\.txt)", user_request)
-        filename = match.group(1) if match else "taskpilot_report.txt"
-        report += f"\n\nAll Tool Outputs:\n{json.dumps(outputs, indent=2)}"
-        result = save_note.invoke({"filename": filename, "content": report})
-        outputs.append({"tool": "save_note", "input": filename, "output": result})
-
-    if not outputs:
-        outputs.append({"tool": "task_planner", "input": user_request, "output": "Plan created. No matching execution tool was requested."})
+            outputs.append({
+                "type": "tool",
+                "tool": name,
+                "input": args,
+                "output": str(result),
+            })
+            messages.append(ToolMessage(
+                content=str(result),
+                tool_call_id=call_id,
+            ))
+    else:
+        outputs.append({
+            "type": "system",
+            "output": "Stopped after reaching the maximum tool-call limit.",
+        })
 
     return outputs
 
 
-# 11. BUILD LANGGRAPH
+# ============================================================
+# 7. FINAL STRUCTURED REPORT
+# ============================================================
+
+def create_final_report(user_request: str, plan: dict,
+                        tool_outputs: list[dict]) -> dict:
+    llm = get_llm().bind(response_format={"type": "json_object"})
+
+    messages = [
+        SystemMessage(content=f"""
+You are TaskPilot's final response formatter and reviewer.
+
+Return ONLY valid JSON matching this schema:
+{json.dumps(FinalReport.model_json_schema(), ensure_ascii=False)}
+
+Your response MUST contain the complete answer inside the tables array.
+Do not put the substantive answer in prose outside the tables.
+
+Rules:
+- Answer the user's ORIGINAL request, not merely describe the plan.
+- Use the approved plan as guidance and actual tool outputs when relevant.
+- Never invent a tool result, calculation, file, or completed action.
+- If an assistant_response exists, use it as the main factual source.
+- If no tool was needed, answer directly using tables.
+- Create useful sections such as "Request Summary", "Detailed Answer",
+  "Execution Results", "Success Criteria", and "Limitations" as relevant.
+- Every table must have a section, headers, and rows.
+- Every row must have the same number of cells as its table headers.
+- Keep cells concise but sufficiently informative.
+- Mention unavailable capabilities in a Limitations table when relevant.
+- Do not claim success for an action that was not executed.
+- status must be one of: completed, partially_completed, failed.
+"""),
+        HumanMessage(content=(
+            f"ORIGINAL USER REQUEST:\n{user_request}\n\n"
+            f"APPROVED PLAN:\n{json.dumps(plan, ensure_ascii=False)}\n\n"
+            f"ACTUAL EXECUTION OUTPUTS:\n{json.dumps(tool_outputs, ensure_ascii=False)}"
+        )),
+    ]
+
+    data = parse_json_object(llm.invoke(messages).content)
+
+    # Normalize rows so every row matches its table's header count.
+    normalized_tables = []
+    for table in data.get("tables", []):
+        if not isinstance(table, dict):
+            continue
+        headers = [str(value) for value in (table.get("headers") or [])]
+        if not headers:
+            headers = ["Details"]
+        rows = []
+        for row in table.get("rows", []):
+            if isinstance(row, (list, tuple)):
+                cells = [str(value) for value in row]
+            else:
+                cells = [str(row)]
+            cells = cells[:len(headers)]
+            cells.extend([""] * (len(headers) - len(cells)))
+            rows.append(cells)
+        normalized_tables.append({
+            "section": str(table.get("section") or "Report"),
+            "headers": headers,
+            "rows": rows,
+        })
+
+    if not normalized_tables:
+        normalized_tables = [{
+            "section": "Final Answer",
+            "headers": ["Field", "Details"],
+            "rows": [["Answer", "The model did not return a structured table."]],
+        }]
+
+    normalized = {
+        "title": str(data.get("title") or "TaskPilot Final Review"),
+        "status": str(data.get("status") or "completed"),
+        "tables": normalized_tables,
+    }
+    if normalized["status"] not in {"completed", "partially_completed", "failed"}:
+        normalized["status"] = "partially_completed"
+
+    return FinalReport.model_validate(normalized).model_dump()
+
+
+# ============================================================
+# 8. LANGGRAPH WITH MANDATORY HUMAN APPROVAL
+# ============================================================
 
 def build_graph():
-    llm = get_llm()
-
-    # PLANNER NODE
     def planner_node(state: AgentState):
         plan = generate_plan(state["user_request"])
         return {"plan": plan, "status": "plan_created"}
 
-    # HUMAN APPROVAL NODE
-    def approval_node(state: AgentState):
+    def human_approval_node(state: AgentState):
+        # Graph pauses here. No executor node runs until resume approval.
         decision = interrupt({
-            "message": "TaskPilot has generated a task plan.",
+            "message": "TaskPilot has prepared a plan. Review it before execution.",
             "question": "Do you approve this plan?",
-            "plan": state["plan"]
+            "plan": state["plan"],
+            "options": ["Approve", "Reject"],
         })
-        return {"approved": decision.get("approved", False)}
+        return {"approved": bool(decision.get("approved", False))}
 
-    # APPROVAL ROUTER
     def approval_router(state: AgentState):
         return "executor" if state.get("approved") is True else "rejected"
 
-    # EXECUTOR NODE
     def executor_node(state: AgentState):
-        outputs = execute_tools(state["user_request"], state["plan"])
+        outputs = execute_request(state["user_request"], state["plan"])
         return {"tool_outputs": outputs, "status": "executed"}
 
-    # REVIEWER NODE
     def reviewer_node(state: AgentState):
-        try:
-            response = llm.invoke([
-                SystemMessage(content="You are TaskPilot Reviewer. Review the actual execution results. Explain completed work, tools used, results and limitations. Never invent results."),
-                HumanMessage(content=f"User Request: {state['user_request']}\nPlan: {json.dumps(state['plan'], indent=2)}\nActual Tool Outputs: {json.dumps(state.get('tool_outputs', []), indent=2)}")
-            ])
-            review = str(response.content)
-        except Exception as exc:
-            review = f"Execution finished. Review generation failed: {exc}"
-        return {"review": review, "status": "completed"}
+        report = create_final_report(
+            state["user_request"],
+            state["plan"],
+            state.get("tool_outputs", []),
+        )
+        return {
+            "report": report,
+            # Keep the full structured report in review as well.
+            # FinalReport contains title, status and tables, not final_answer.
+            "review": report,
+            "status": report.get("status", "completed"),
+        }
 
-    # REJECT NODE
     def rejected_node(state: AgentState):
-        return {"status": "rejected", "review": "Plan rejected. No tools were executed."}
+        return {
+            "approved": False,
+            "tool_outputs": [],
+            "status": "rejected",
+            "review": "Plan rejected by the user. No tools were executed.",
+            "report": None,
+        }
 
-    # GRAPH
-    graph = StateGraph(AgentState)
-    graph.add_node("planner", planner_node)
-    graph.add_node("approval", approval_node)
-    graph.add_node("executor", executor_node)
-    graph.add_node("reviewer", reviewer_node)
-    graph.add_node("rejected", rejected_node)
-    graph.add_edge(START, "planner")
-    graph.add_edge("planner", "approval")
-    graph.add_conditional_edges("approval", approval_router, {"executor": "executor", "rejected": "rejected"})
-    graph.add_edge("executor", "reviewer")
-    graph.add_edge("reviewer", END)
-    graph.add_edge("rejected", END)
-    return graph.compile(checkpointer=memory)
+    workflow = StateGraph(AgentState)
+    workflow.add_node("planner", planner_node)
+    workflow.add_node("human_approval", human_approval_node)
+    workflow.add_node("executor", executor_node)
+    workflow.add_node("reviewer", reviewer_node)
+    workflow.add_node("rejected", rejected_node)
+
+    workflow.add_edge(START, "planner")
+    workflow.add_edge("planner", "human_approval")
+    workflow.add_conditional_edges(
+        "human_approval",
+        approval_router,
+        {"executor": "executor", "rejected": "rejected"},
+    )
+    workflow.add_edge("executor", "reviewer")
+    workflow.add_edge("reviewer", END)
+    workflow.add_edge("rejected", END)
+
+    return workflow.compile(checkpointer=checkpointer)
 
 
-# 12. HOME PAGE
+agent = build_graph()
 
-@app.route("/", methods=["GET"])
+
+# ============================================================
+# 9. FLASK ROUTES
+# ============================================================
+
+@app.get("/")
 def home():
     return render_template("index.html")
 
 
-# 13. HEALTH CHECK
-
-@app.route("/api/health", methods=["GET"])
+@app.get("/api/health")
 def health():
-    return jsonify({"status": "success", "message": "TaskPilot is running"})
+    return jsonify({
+        "status": "success",
+        "message": "TaskPilot is running",
+        "approval_required": True,
+    })
 
 
-# 14. RUN AGENT API
-
-@app.route("/api/run", methods=["POST"])
+@app.post("/api/run")
 def run_agent():
     try:
         data = request.get_json(silent=True) or {}
-        user_request = (data.get("request") or "").strip()
+        user_request = str(data.get("request") or "").strip()
 
         if len(user_request) < 3:
-            return jsonify({"error": "Enter a valid task."}), 400
+            return jsonify({"error": "Please enter a valid request."}), 400
 
         thread_id = str(uuid.uuid4())
-        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 15}
-        agent = build_graph()
-        result = agent.invoke({"user_request": user_request}, config=config)
-        pending = result.get("__interrupt__", [])
+        config = {
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": 20,
+        }
 
+        result = agent.invoke(
+            {"user_request": user_request},
+            config=config,
+        )
+
+        pending = result.get("__interrupt__", [])
         if pending:
             return jsonify({
                 "status": "awaiting_approval",
                 "thread_id": thread_id,
-                "approval_request": pending[0].value
-            })
+                "approval_request": pending[0].value,
+            }), 200
 
-        return jsonify({"status": result.get("status"), "review": result.get("review", "")})
+        # Defensive response: normal flow should pause for approval.
+        return jsonify({
+            "status": result.get("status", "unknown"),
+            "report": result.get("report"),
+            "review": result.get("review", ""),
+        }), 200
 
     except Exception as exc:
-        app.logger.exception("Agent execution failed")
+        app.logger.exception("TaskPilot run failed")
         return jsonify({"error": str(exc)}), 500
 
 
-# 15. APPROVAL API
-
-@app.route("/api/approve", methods=["POST"])
+@app.post("/api/approve")
 def approve_agent():
     try:
         data = request.get_json(silent=True) or {}
@@ -361,44 +575,70 @@ def approve_agent():
         approved = data.get("approved")
 
         if not thread_id or not isinstance(approved, bool):
-            return jsonify({"error": "Invalid approval request."}), 400
+            return jsonify({
+                "error": "thread_id and boolean approved are required."
+            }), 400
 
-        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 15}
-        agent = build_graph()
-        result = agent.invoke(Command(resume={"approved": approved}), config=config)
+        config = {
+            "configurable": {"thread_id": str(thread_id)},
+            "recursion_limit": 20,
+        }
+
+        result = agent.invoke(
+            Command(resume={"approved": approved}),
+            config=config,
+        )
+
+        # A second interrupt should not normally occur, but handle it safely.
+        pending = result.get("__interrupt__", [])
+        if pending:
+            return jsonify({
+                "status": "awaiting_approval",
+                "thread_id": thread_id,
+                "approval_request": pending[0].value,
+            }), 200
 
         return jsonify({
-            "status": result.get("status"),
+            "status": result.get("status", "unknown"),
+            "approved": approved,
+            "report": result.get("report"),
             "review": result.get("review", ""),
-            "tool_outputs": result.get("tool_outputs", [])
-        })
+            "tool_outputs": result.get("tool_outputs", []),
+        }), 200
 
     except Exception as exc:
-        app.logger.exception("Approval execution failed")
+        app.logger.exception("TaskPilot approval failed")
         return jsonify({"error": str(exc)}), 500
 
 
-# 16. GENERATE PLAN API
-
-@app.route("/api/plan", methods=["POST"])
+@app.post("/api/plan")
 def create_plan():
+    """
+    Preview-only endpoint. It generates a plan but does not execute anything.
+    The /api/run endpoint is the approval-gated execution workflow.
+    """
     try:
         data = request.get_json(silent=True) or {}
-        user_request = (data.get("request") or "").strip()
+        user_request = str(data.get("request") or "").strip()
 
         if len(user_request) < 3:
-            return jsonify({"error": "Enter a valid task."}), 400
+            return jsonify({"error": "Please enter a valid request."}), 400
 
         plan = generate_plan(user_request)
-        return jsonify({"status": "success", "plan": plan})
+        return jsonify({"status": "success", "plan": plan}), 200
 
+    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+        app.logger.exception("Plan validation failed")
+        return jsonify({"error": str(exc)}), 422
     except Exception as exc:
         app.logger.exception("Plan generation failed")
         return jsonify({"error": str(exc)}), 500
 
 
-# 17. RUN FLASK
+# ============================================================
+# 10. START SERVER
+# ============================================================
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
-
+    # Use debug=False outside local development.
+    app.run(host="127.0.0.1", port=5000, debug=True, use_reloader=False)
