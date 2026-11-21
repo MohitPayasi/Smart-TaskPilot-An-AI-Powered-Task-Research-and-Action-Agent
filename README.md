@@ -4,8 +4,6 @@ Smart-TaskPilot is an agentic AI assistant built with **Flask**, **LangChain**, 
 
 ---
 
-## 📅 Workshop Structure
-
 The repository is structured across three iterative development phases:
 
 ### [Day 1: Structured Planning & Schema Enforcement](file:///Day1)
