@@ -470,10 +470,8 @@ def build_graph():
         )
         return {
             "report": report,
-            # Keep the full structured report in review as well.
-            # FinalReport contains title, status and tables, not final_answer.
-            "review": report,
-            "status": report.get("status", "completed"),
+            "review": report["final_answer"],
+            "status": report["status"],
         }
 
     def rejected_node(state: AgentState):
@@ -641,4 +639,4 @@ def create_plan():
 
 if __name__ == "__main__":
     # Use debug=False outside local development.
-    app.run(host="127.0.0.1", port=5000, debug=True, use_reloader=False)
+    app.run(host="127.0.0.1", port=5000, debug=True)
