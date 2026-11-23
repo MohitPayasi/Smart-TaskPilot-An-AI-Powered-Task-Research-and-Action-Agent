@@ -1,87 +1,250 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TaskPilot Day 1</title>
-<style>
-:root{--bg:#f4f7fb;--card:#fff;--ink:#172033;--muted:#667085;--blue:#3157d5;--line:#e5eaf2;--green:#16834a;--red:#c0392b}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Arial,sans-serif}
-header{background:#101b35;color:#fff;padding:18px 5%;display:flex;justify-content:space-between;align-items:center}
-.logo{font-size:22px;font-weight:800}.logo span{color:#91adff}header small{color:#c7d1e7}
-main{width:min(1100px,92%);margin:34px auto 55px}.eyebrow{color:var(--blue);font-size:12px;font-weight:800;letter-spacing:1px;text-transform:uppercase}
-h1{font-size:36px;margin:9px 0}.subtitle,.muted{color:var(--muted);line-height:1.6}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 8px 25px #1720330a}
-h2{font-size:19px;margin:0 0 8px}label{display:block;font-size:13px;font-weight:bold;margin:16px 0 8px}
-textarea{width:100%;min-height:155px;padding:14px;border:1px solid #d7deea;border-radius:10px;resize:vertical;font:14px Arial;line-height:1.55}
-textarea:focus{outline:2px solid #3157d52b;border-color:var(--blue)}
-.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:13px}
-button{border:0;border-radius:9px;padding:11px 15px;cursor:pointer;font-weight:bold}
-button:disabled{opacity:.55;cursor:wait}.primary{background:var(--blue);color:white}.secondary{background:#edf1f8;color:#27334b}
-.approve{background:var(--green);color:#fff}.reject{background:#fff0ee;color:var(--red)}
-.status{margin-top:15px;padding:11px 13px;border-radius:9px;background:#f0f4fa;color:#46536a;font-size:13px;line-height:1.5}
-.status.success{background:#eaf8ef;color:var(--green)}.status.error{background:#fff0ee;color:var(--red)}
-.hidden{display:none!important}.output{font-size:14px;line-height:1.6;overflow-wrap:anywhere}
-.output h3{font-size:15px;margin:17px 0 7px}.task{padding:12px;margin:9px 0;border:1px solid var(--line);border-radius:9px;background:#fcfdff}
-.task strong{display:block;margin-bottom:5px}.meta{color:var(--muted);font-size:12px}
-.approval{margin-top:15px;padding:14px;border:1px solid #f0dca8;background:#fff7e6;border-radius:10px}
-footer{text-align:center;padding:25px 0;color:var(--muted);font-size:12px}
-@media(max-width:780px){.grid{grid-template-columns:1fr}header small{display:none}h1{font-size:29px}}
-</style>
-</head>
-<body>
-<header><div class="logo">Task<span>Pilot</span> · Day 1</div><small>LangChain · LangGraph · Groq · Flask</small></header>
-<main>
-<section><div class="eyebrow">3-Day Agentic AI Workshop · Day 1</div>
-<h1>Build your AI task assistant</h1><p class="subtitle">Understand LLMs and prompts, then convert a user request into a structured task plan using LangChain and Pydantic.</p></section>
-<section class="grid">
-<div class="card">
-<h2>Enter your task</h2><p class="muted">Describe the goal you want TaskPilot to work on.</p>
-<label for="task">Your request</label>
-<textarea id="task" placeholder="Example: Create a 2-day Python workshop plan for beginners."></textarea>
-<div class="actions"><button class="primary" onclick="generatePlan()">Generate Task Plan</button></div>
-<div id="status" class="status">Ready. Enter a task to begin.</div>
 
-</div>
-<div class="card"><h2>Agent output</h2><p class="muted">Structured results will appear here.</p>
-<div id="output" class="output"><p class="meta">No output yet.</p></div></div>
-</section>
-<footer>TaskPilot · Day 1 · Built with Flask, LangChain, LangGraph and Groq</footer>
-</main>
-<script>
-let currentThreadId = null;
-const statusBox=document.getElementById("status"), outputBox=document.getElementById("output");
-function esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));}
-function status(msg,type=""){statusBox.textContent=msg;statusBox.className="status"+(type?" "+type:"");}
-function busy(v){document.querySelectorAll("button").forEach(b=>b.disabled=v);}
-function renderPlan(p){
- if(!p)return;let h=`<h3>Goal</h3><p>${esc(p.goal)}</p><p class="meta">Estimated time: ${esc(p.total_estimated_minutes)} minutes</p><h3>Steps</h3>`;
- (p.steps||[]).forEach(s=>{h+=`<div class="task"><strong>${esc(s.step_number)}. ${esc(s.title)}</strong><div>${esc(s.description)}</div><div class="meta">Time: ${esc(s.estimated_minutes)} min · Expected: ${esc(s.expected_output)}</div></div>`;});
- if(p.assumptions?.length)h+="<h3>Assumptions</h3><ul>"+p.assumptions.map(x=>`<li>${esc(x)}</li>`).join("")+"</ul>";
- if(p.success_criteria?.length)h+="<h3>Success criteria</h3><ul>"+p.success_criteria.map(x=>`<li>${esc(x)}</li>`).join("")+"</ul>";
- outputBox.innerHTML=h;
+// ==========================================
+// 1. DOM ELEMENTS
+// ==========================================
+
+const statusBox = document.getElementById("status");
+
+const outputBox = document.getElementById("output");
+
+
+// ==========================================
+// 2. HTML ESCAPE FUNCTION
+// ==========================================
+
+function esc(value) {
+
+    return String(value ?? "").replace(
+        /[&<>"']/g,
+        char => ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#039;"
+        }[char])
+    );
+
 }
-async function post(url,body){const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw Error(d.error||"Request failed");return d;}
-async function generatePlan(){
- const task=document.getElementById("task").value.trim();if(task.length<3)return status("Enter at least 3 characters.","error");
- busy(true);status("Generating structured plan...");
- try{const d=await post("/api/plan",{request:task});renderPlan(d.plan);status("Plan generated successfully.","success");}
- catch(e){status(e.message,"error");}finally{busy(false);}
+
+
+// ==========================================
+// 3. STATUS FUNCTION
+// ==========================================
+
+function status(message, type = "") {
+
+    statusBox.textContent = message;
+
+    statusBox.className = "status" +
+        (type ? " " + type : "");
+
 }
-async function runAgent(){
- const task=document.getElementById("task").value.trim();if(task.length<3)return status("Enter at least 3 characters.","error");
- busy(true);status("Starting TaskPilot workflow...");
- try{const d=await post("/api/run",{request:task});currentThreadId=d.thread_id;if(d.plan)renderPlan(d.plan);
- if(d.status==="awaiting_approval"){renderPlan(d.approval_request.plan);document.getElementById("approval").classList.remove("hidden");status("Plan ready. Approval is required before tool execution.","success");}
- else{outputBox.innerHTML+=`<h3>Execution review</h3><p>${esc(d.review)}</p>`;status("Agent workflow completed.","success");}}
- catch(e){status(e.message,"error");}finally{busy(false);}
+
+
+// ==========================================
+// 4. BUTTON LOADING
+// ==========================================
+
+function busy(value) {
+
+    document.querySelectorAll("button").forEach(
+        button => {
+            button.disabled = value;
+        }
+    );
+
 }
-async function sendApproval(approved){
- if(!currentThreadId)return status("No pending run. Start the agent first.","error");
- busy(true);status(approved?"Approved. Executing tools...":"Rejecting plan...");
- try{const d=await post("/api/approve",{thread_id:currentThreadId,approved});document.getElementById("approval").classList.add("hidden");
- outputBox.innerHTML+=`<h3>Execution review</h3><p>${esc(d.review||"No review returned.")}</p><p class="meta">Status: ${esc(d.status)}</p>`;
- status(approved?"Execution completed.":"Plan rejected. No tools were executed.",approved?"success":"");}
- catch(e){status(e.message,"error");}finally{busy(false);}
+
+
+// ==========================================
+// 5. RENDER TASK PLAN
+// ==========================================
+
+function renderPlan(plan) {
+
+    if (!plan) return;
+
+    let html = `
+        <h3>Goal</h3>
+
+        <p>${esc(plan.goal)}</p>
+
+        <p class="meta">
+            Estimated time:
+            ${esc(plan.total_estimated_minutes)} minutes
+        </p>
+
+        <h3>Steps</h3>
+    `;
+
+    (plan.steps || []).forEach(step => {
+
+        html += `
+            <div class="task">
+
+                <strong>
+                    ${esc(step.step_number)}.
+                    ${esc(step.title)}
+                </strong>
+
+                <div>
+                    ${esc(step.description)}
+                </div>
+
+                <div class="meta">
+                    Time: ${esc(step.estimated_minutes)} min
+                    <br>
+                    Expected:
+                    ${esc(step.expected_output)}
+                </div>
+
+            </div>
+        `;
+
+    });
+
+
+    // Assumptions
+
+    if (plan.assumptions?.length) {
+
+        html += `
+            <h3>Assumptions</h3>
+
+            <ul>
+                ${plan.assumptions.map(
+                    item => `<li>${esc(item)}</li>`
+                ).join("")}
+            </ul>
+        `;
+
+    }
+
+
+    // Success criteria
+
+    if (plan.success_criteria?.length) {
+
+        html += `
+            <h3>Success Criteria</h3>
+
+            <ul>
+                ${plan.success_criteria.map(
+                    item => `<li>${esc(item)}</li>`
+                ).join("")}
+            </ul>
+        `;
+
+    }
+
+    outputBox.innerHTML = html;
+
 }
-</script>
-</body></html>
+
+
+// ==========================================
+// 6. API REQUEST FUNCTION
+// ==========================================
+
+async function post(url, body) {
+
+    const response = await fetch(url, {
+
+        method: "POST",
+
+        headers: {
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify(body)
+
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+
+        throw new Error(
+            data.error || "Request failed"
+        );
+
+    }
+
+    return data;
+
+}
+
+
+// ==========================================
+// 7. GENERATE TASK PLAN
+// ==========================================
+
+async function generatePlan() {
+
+    const task = document
+        .getElementById("task")
+        .value
+        .trim();
+
+
+    // Input validation
+
+    if (task.length < 3) {
+
+        status(
+            "Enter at least 3 characters.",
+            "error"
+        );
+
+        return;
+
+    }
+
+
+    // Start loading
+
+    busy(true);
+
+    status("Generating structured task plan...");
+
+    outputBox.innerHTML = "";
+
+
+    try {
+
+        const data = await post(
+            "/api/plan",
+            {
+                request: task
+            }
+        );
+
+
+        // Render result
+
+        renderPlan(data.plan);
+
+        status(
+            "Task plan generated successfully.",
+            "success"
+        );
+
+
+    } catch (error) {
+
+        console.error("TaskPilot Error:", error);
+
+        status(
+            error.message,
+            "error"
+        );
+
+
+    } finally {
+
+        busy(false);
+
+    }
+
+}

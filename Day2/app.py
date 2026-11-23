@@ -21,9 +21,6 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 
-# ==========================================
-# 1. APPLICATION SETUP
-# ==========================================
 
 load_dotenv()
 
@@ -33,9 +30,6 @@ OUTPUT_DIR = Path("taskpilot_outputs")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
-# ==========================================
-# 2. PYDANTIC MODELS
-# ==========================================
 
 class TaskStep(BaseModel):
     step_number: int
@@ -53,9 +47,6 @@ class TaskPlan(BaseModel):
     success_criteria: list[str] = Field(default_factory=list)
 
 
-# ==========================================
-# 3. LANGGRAPH STATE
-# ==========================================
 
 class AgentState(TypedDict, total=False):
     user_request: str
@@ -63,10 +54,6 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     review: str
 
-
-# ==========================================
-# 4. GROQ LLM
-# ==========================================
 
 def get_llm():
     api_key = os.getenv("GROQ_API_KEY")
@@ -76,10 +63,6 @@ def get_llm():
 
     return ChatGroq(model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"), temperature=0, api_key=api_key)
 
-
-# ==========================================
-# 5. PLAN GENERATOR
-# ==========================================
 
 def generate_plan(user_request):
 
@@ -137,7 +120,7 @@ def generate_plan(user_request):
 
     data = json.loads(content[start:end + 1])
 
-    # Convert string steps into dictionaries
+    
 
     steps = []
 
@@ -179,9 +162,6 @@ def generate_plan(user_request):
     return TaskPlan.model_validate(data)
 
 
-# ==========================================
-# 6. CALCULATOR TOOL
-# ==========================================
 
 @tool
 def calculator(expression: str) -> str:
@@ -230,9 +210,6 @@ def calculator(expression: str) -> str:
         return f"Calculation error: {exc}"
 
 
-# ==========================================
-# 7. TEXT ANALYZER TOOL
-# ==========================================
 
 @tool
 def text_analyzer(text: str) -> str:
@@ -245,9 +222,7 @@ def text_analyzer(text: str) -> str:
     return f"Words: {words}, Characters: {characters}, Lines: {lines}"
 
 
-# ==========================================
-# 8. SAVE NOTE TOOL
-# ==========================================
+
 
 @tool
 def save_note(filename: str, content: str) -> str:
@@ -275,16 +250,9 @@ def save_note(filename: str, content: str) -> str:
         return f"File saving error: {exc}"
 
 
-# ==========================================
-# 9. REGISTER TOOLS
-# ==========================================
-
 TOOLS = [calculator, text_analyzer, save_note]
 
 
-# ==========================================
-# 10. CALCULATION REQUEST DETECTION
-# ==========================================
 
 def get_calculation_call(user_request):
 
@@ -316,23 +284,17 @@ def get_calculation_call(user_request):
 
     return expression
 
-
-# ==========================================
-# 11. BUILD LANGGRAPH
-# ==========================================
-
 def build_graph():
 
     llm = get_llm()
     tool_llm = llm.bind_tools(TOOLS, tool_choice="auto")
 
-    # PLANNER NODE
+    
 
     def planner_node(state: AgentState):
         plan = generate_plan(state["user_request"])
         return {"plan": plan}
 
-    # EXECUTOR NODE
 
     def executor_node(state: AgentState):
 
@@ -387,7 +349,7 @@ def build_graph():
 
         return {"messages": [response]}
 
-    # REVIEWER NODE
+
 
     def reviewer_node(state: AgentState):
 
@@ -430,27 +392,15 @@ def build_graph():
     return graph.compile()
 
 
-# ==========================================
-# 12. HOME ROUTE
-# ==========================================
-
 @app.route("/", methods=["GET"])
 def home():
     return render_template("index.html")
 
 
-# ==========================================
-# 13. HEALTH CHECK
-# ==========================================
 
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({"status": "success", "message": "TaskPilot is running"})
-
-
-# ==========================================
-# 14. GENERATE PLAN API
-# ==========================================
 
 @app.route("/api/plan", methods=["POST"])
 def create_plan():
@@ -470,10 +420,6 @@ def create_plan():
         app.logger.exception("Plan generation failed")
         return jsonify({"error": str(exc)}), 500
 
-
-# ==========================================
-# 15. RUN AGENT API
-# ==========================================
 
 @app.route("/api/run", methods=["POST"])
 def run_agent():
@@ -510,10 +456,6 @@ def run_agent():
         app.logger.exception("Agent execution failed")
         return jsonify({"error": str(exc)}), 500
 
-
-# ==========================================
-# 16. RUN APPLICATION
-# ==========================================
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=True)

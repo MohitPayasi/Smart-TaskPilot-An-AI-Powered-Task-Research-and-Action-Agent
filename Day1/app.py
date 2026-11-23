@@ -2,18 +2,10 @@
 import os
 
 from dotenv import load_dotenv
-
-from flask import (
-    Flask,
-    jsonify,
-    render_template,
-    request
-)
+from flask import Flask, jsonify, render_template, request
 
 from pydantic import BaseModel, Field
-
 from langchain_groq import ChatGroq
-
 from langchain_core.prompts import ChatPromptTemplate
 
 
@@ -33,7 +25,8 @@ app = Flask(__name__)
 class TaskStep(BaseModel):
 
     step_number: int = Field(
-        description="Step number in sequence"
+        ge=1,
+        description="Sequential step number"
     )
 
     title: str = Field(
@@ -82,7 +75,7 @@ class TaskPlan(BaseModel):
 
 
 # ==========================================
-# 3. GROQ LLM CONFIGURATION
+# 3. INITIALIZE GROQ LLM
 # ==========================================
 
 def get_llm():
@@ -90,7 +83,6 @@ def get_llm():
     api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key:
-
         raise RuntimeError(
             "GROQ_API_KEY is missing from .env file"
         )
@@ -103,7 +95,8 @@ def get_llm():
     llm = ChatGroq(
         model=model_name,
         temperature=0,
-        api_key=api_key)
+        api_key=api_key
+    )
 
     return llm
 
@@ -119,23 +112,20 @@ def home():
 
 
 # ==========================================
-# 5. HEALTH CHECK ROUTE
+# 5. HEALTH CHECK
 # ==========================================
 
 @app.route("/api/health", methods=["GET"])
 def health():
 
     return jsonify({
-
         "status": "success",
-
         "message": "TaskPilot API is running"
-
     })
 
 
 # ==========================================
-# 6. TASK PLAN GENERATION
+# 6. GENERATE TASK PLAN
 # ==========================================
 
 @app.route("/api/plan", methods=["POST"])
@@ -143,7 +133,7 @@ def create_plan():
 
     try:
 
-        # Get JSON data from frontend
+        # Get request data
 
         data = request.get_json(silent=True) or {}
 
@@ -151,64 +141,65 @@ def create_plan():
 
         user_request = user_request.strip()
 
-
         # Validate user input
 
         if len(user_request) < 3:
 
             return jsonify({
-
                 "status": "error",
-
                 "error": "Please enter a valid task."
-
             }), 400
 
-
-        # Create Prompt Template
+        # Create prompt
 
         prompt = ChatPromptTemplate.from_messages([
 
             (
                 "system",
                 """
-                You are TaskPilot,
-                an intelligent AI task planning assistant.
+                You are TaskPilot, an intelligent AI task
+                planning assistant.
 
-                Your job is to convert user requests
-                into practical and realistic task plans.
+                Your job is to convert user requests into
+                practical and realistic task plans.
 
-                Follow these instructions:
+                STRICT INSTRUCTIONS:
 
                 1. Understand the user's goal.
-
                 2. Break the goal into actionable steps.
-
                 3. Arrange steps in the correct order.
-
-                4. Provide realistic time estimates.
-
+                4. Provide realistic time estimates in minutes.
                 5. Every step must have an expected output.
-
                 6. Include assumptions when necessary.
-
                 7. Calculate total estimated time correctly.
-
                 8. Define clear success criteria.
+                9. Never claim that you executed a task.
+                10. Return data according to the supplied schema.
 
-                9. Do not claim that you have executed tasks.
+                IMPORTANT FIELD REQUIREMENTS:
 
-                10. Return structured JSON data only.
+                Every step MUST contain:
 
-                Do not return normal conversational text.
+                - step_number
+                - title
+                - description
+                - estimated_minutes
+                - expected_output
+
+                Do not use alternative field names such as
+                step, estimated_time_hours or time.
+
+                The total_estimated_minutes must be the sum
+                of all step estimated_minutes.
+
+                Generate a practical and detailed plan.
                 """
             ),
 
             (
                 "human",
                 """
-                Create a detailed task plan
-                for the following request:
+                Create a detailed task plan for this request:
 
                 {user_request}
                 """
@@ -216,64 +207,53 @@ def create_plan():
 
         ])
 
-
-        # Configure Structured Output
+        # Initialize LLM
 
         llm = get_llm()
 
+        # Configure structured output
+
         structured_llm = llm.with_structured_output(
-
             TaskPlan,
+            method="function_calling"
+        )
 
-            method="json_mode")
-
-
-        # Create LangChain Pipeline
+        # Create LangChain pipeline
 
         chain = prompt | structured_llm
 
-
-        # Invoke LLM
+        # Generate plan
 
         plan = chain.invoke({
-
             "user_request": user_request
-
         })
 
+        # Validate result
 
-        # Convert Pydantic Model into Dictionary
+        if not isinstance(plan, TaskPlan):
+
+            plan = TaskPlan.model_validate(plan)
+
+        # Convert Pydantic object to dictionary
 
         result = plan.model_dump()
 
-
-        # Return Successful Response
+        # Return response
 
         return jsonify({
-
             "status": "success",
-
             "plan": result
-
         }), 200
-
 
     except Exception as exc:
 
-        # Log complete error in terminal
-
         app.logger.exception(
-            "TaskPilot plan generation failed")
-
-
-        # Return error response
+            "TaskPilot plan generation failed"
+        )
 
         return jsonify({
-
-"status": "error",
-
+            "status": "error",
             "error": str(exc)
-
         }), 500
 
 
@@ -283,4 +263,8 @@ def create_plan():
 
 if __name__ == "__main__":
 
-    app.run(host="127.0.0.1",port=5000,debug=True)
+    app.run(
+        host="127.0.0.1",
+        port=5000,
+        debug=True
+    )
