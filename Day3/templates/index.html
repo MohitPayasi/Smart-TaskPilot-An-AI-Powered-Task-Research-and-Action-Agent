@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaskPilot - AI Task Assistant</title>
+    <style>
+        :root {
+            --bg: #f4f7fb;
+            --card: #ffffff;
+            --ink: #172033;
+            --muted: #667085;
+            --blue: #3157d5;
+            --line: #e5eaf2;
+            --green: #16834a;
+            --red: #c0392b;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--ink);
+            font-family: Arial, sans-serif;
+        }
+        header {
+            background: #101b35;
+            color: white;
+            padding: 18px 5%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .logo { font-size: 22px; font-weight: 800; }
+        .logo span { color: #91adff; }
+        main { width: min(1100px, 92%); margin: 35px auto; }
+        .eyebrow {
+            color: var(--blue);
+            font-size: 12px;
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+        h1 { font-size: 36px; }
+        .subtitle, .muted { color: var(--muted); line-height: 1.6; }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            align-items: start;
+        }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 22px;
+            box-shadow: 0 8px 25px #1720330a;
+            min-width: 0;
+        }
+        textarea {
+            width: 100%;
+            min-height: 160px;
+            padding: 14px;
+            border: 1px solid #d7deea;
+            border-radius: 10px;
+            font: 14px Arial;
+            resize: vertical;
+        }
+        textarea:focus { outline: 2px solid #3157d52b; border-color: var(--blue); }
+        label { display: block; font-weight: bold; margin: 15px 0 8px; }
+        .actions, .approval-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 14px;
+            flex-wrap: wrap;
+        }
+        button {
+            border: 0;
+            border-radius: 9px;
+            padding: 12px 17px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:disabled { opacity: .5; cursor: wait; }
+        .primary { background: var(--blue); color: white; }
+        .secondary { background: #edf1f8; color: #27334b; }
+        .approve { background: var(--green); color: white; }
+        .reject { background: #fff0ee; color: var(--red); }
+        .status {
+            margin-top: 15px;
+            padding: 12px;
+            border-radius: 9px;
+            background: #f0f4fa;
+            color: #46536a;
+            font-size: 13px;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
+        }
+        .status.success { background: #eaf8ef; color: var(--green); }
+        .status.error { background: #fff0ee; color: var(--red); }
+        .output { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+        .task {
+            padding: 12px;
+            margin: 10px 0;
+            border: 1px solid var(--line);
+            border-radius: 9px;
+            background: #fcfdff;
+            overflow-wrap: anywhere;
+        }
+        .task strong { display: block; margin-bottom: 5px; }
+        .meta { color: var(--muted); font-size: 12px; }
+        .hidden { display: none !important; }
+        footer { text-align: center; padding: 25px; color: var(--muted); font-size: 12px; }
+        .modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(10, 20, 40, .70);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 15px;
+            z-index: 9999;
+        }
+        .modal-content {
+            background: white;
+            width: min(700px, 100%);
+            max-height: 85vh;
+            overflow-y: auto;
+            border-radius: 16px;
+            padding: 25px;
+            box-shadow: 0 20px 70px #0004;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .modal-header h2 { margin: 0; }
+        .approval-badge {
+            background: #fff3d6;
+            color: #956000;
+            padding: 7px 11px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .approval-actions button { flex: 1; }
+        .table-wrap { width: 100%; overflow-x: auto; margin: 12px 0 20px; }
+        table { width: 100%; border-collapse: collapse; background: white; }
+        th, td {
+            border: 1px solid var(--line);
+            padding: 10px;
+            text-align: left;
+            vertical-align: top;
+            min-width: 100px;
+            white-space: pre-wrap;
+        }
+        th { background: #edf1f8; }
+        @media (max-width: 780px) {
+            .grid { grid-template-columns: 1fr; }
+            h1 { font-size: 29px; }
+            header small { display: none; }
+            .approval-actions { flex-direction: column; }
+        }
+    </style>
+</head>
+<body>
+<header>
+    <div class="logo">Task<span>Pilot</span> · Day 3</div>
+    <small>LangChain · LangGraph · Groq · Flask</small>
+</header>
+
+<main>
+    <section>
+        <div class="eyebrow">3-DAY AGENTIC AI WORKSHOP · DAY 3</div>
+        <h1>Build your AI Task Assistant</h1>
+        <p class="subtitle">Create a plan, approve it, execute tools and receive a structured final report.</p>
+    </section>
+
+    <section class="grid">
+        <div class="card">
+            <h2>Enter your task</h2>
+            <p class="muted">Describe the goal you want TaskPilot to work on.</p>
+            <label for="task">Your request</label>
+            <textarea id="task" placeholder="Example: Calculate the total revenue for 30 students paying 1500 rupees each."></textarea>
+            <div class="actions">
+                <button class="primary" id="runButton" onclick="runAgent()">Run Agent</button>
+                <button class="secondary" onclick="previewPlan()">Preview Plan</button>
+            </div>
+            <div id="status" class="status">Ready. Enter a task to begin.</div>
+        </div>
+
+        <div class="card">
+            <h2>Agent output</h2>
+            <p class="muted">The plan and final table report will appear here.</p>
+            <div id="output" class="output"><p class="meta">No output yet.</p></div>
+        </div>
+    </section>
+    <footer>TaskPilot · Mandatory Human Approval · LangGraph</footer>
+</main>
+
+<div id="approvalModal" class="modal hidden">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2>Human Approval Required</h2>
+            <span class="approval-badge">ACTION REQUIRED</span>
+        </div>
+        <p class="muted">Review the generated plan before execution.</p>
+        <div id="approvalPlan"></div>
+        <div class="approval-actions">
+            <button class="approve" onclick="sendApproval(true)">Approve &amp; Execute</button>
+            <button class="reject" onclick="sendApproval(false)">Reject Plan</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    let currentThreadId = null;
+
+    const statusBox = document.getElementById("status");
+    const outputBox = document.getElementById("output");
+    const approvalModal = document.getElementById("approvalModal");
+    const approvalPlan = document.getElementById("approvalPlan");
+
+    function esc(value) {
+        return String(value ?? "").replace(/[&<>"']/g, char => ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#039;"
+        }[char]));
+    }
+
+    function setStatus(message, type = "") {
+        statusBox.textContent = message;
+        statusBox.className = "status " + type;
+    }
+
+    function setBusy(value) {
+        document.querySelectorAll("button").forEach(button => {
+            button.disabled = value;
+        });
+    }
+
+    async function postJSON(url, body) {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+        });
+
+        let data;
+        try {
+            data = await response.json();
+        } catch {
+            throw new Error("Server returned an invalid response. Check the Flask terminal.");
+        }
+
+        if (!response.ok) {
+            throw new Error(data.error || `Request failed (${response.status})`);
+        }
+        return data;
+    }
+
+    function renderPlan(plan) {
+        if (!plan) return "<p>No plan was returned.</p>";
+
+        let html = `<h3>Goal</h3><p>${esc(plan.goal)}</p>`;
+        html += `<p class="meta">Estimated time: ${esc(plan.total_estimated_minutes)} minutes</p>`;
+        html += "<h3>Execution Steps</h3>";
+
+        (plan.steps || []).forEach(step => {
+            html += `
+                <div class="task">
+                    <strong>${esc(step.step_number)}. ${esc(step.title)}</strong>
+                    <div>${esc(step.description)}</div>
+                    <div class="meta">Time: ${esc(step.estimated_minutes)} minutes</div>
+                    <div class="meta">Expected: ${esc(step.expected_output)}</div>
+                </div>`;
+        });
+
+        html += "<h3>Assumptions</h3><ul>";
+        (plan.assumptions || []).forEach(item => {
+            html += `<li>${esc(item)}</li>`;
+        });
+        html += "</ul><h3>Success Criteria</h3><ul>";
+        (plan.success_criteria || []).forEach(item => {
+            html += `<li>${esc(item)}</li>`;
+        });
+        return html + "</ul>";
+    }
+
+    function renderReport(report) {
+        if (!report) {
+            outputBox.innerHTML = "<p>No final report was returned.</p>";
+            return;
+        }
+
+        let html = `<h2>${esc(report.title || "TaskPilot Final Review")}</h2>`;
+        html += `<p class="meta">Status: ${esc(report.status || "unknown")}</p>`;
+
+        (report.tables || []).forEach(tableData => {
+            html += `<h3>${esc(tableData.section || "Results")}</h3>`;
+            html += '<div class="table-wrap"><table><thead><tr>';
+
+            (tableData.headers || []).forEach(header => {
+                html += `<th>${esc(header)}</th>`;
+            });
+
+            html += "</tr></thead><tbody>";
+            (tableData.rows || []).forEach(row => {
+                html += "<tr>";
+                (row || []).forEach(cell => {
+                    html += `<td>${esc(cell)}</td>`;
+                });
+                html += "</tr>";
+            });
+            html += "</tbody></table></div>";
+        });
+
+        outputBox.innerHTML = html;
+    }
+
+    async function previewPlan() {
+        const task = document.getElementById("task").value.trim();
+        if (task.length < 3) {
+            setStatus("Enter at least 3 characters.", "error");
+            return;
+        }
+
+        setBusy(true);
+        setStatus("Generating plan preview...");
+        try {
+            const data = await postJSON("/api/plan", { request: task });
+            outputBox.innerHTML = renderPlan(data.plan);
+            setStatus("Plan preview generated. No tools have been executed.", "success");
+        } catch (error) {
+            setStatus(error.message, "error");
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    async function runAgent() {
+        const task = document.getElementById("task").value.trim();
+        if (task.length < 3) {
+            setStatus("Enter at least 3 characters.", "error");
+            return;
+        }
+
+        setBusy(true);
+        currentThreadId = null;
+        approvalModal.classList.add("hidden");
+        outputBox.innerHTML = "";
+        setStatus("TaskPilot is generating your plan...");
+
+        try {
+            const data = await postJSON("/api/run", { request: task });
+
+            if (data.status !== "awaiting_approval" || !data.thread_id || !data.approval_request) {
+                throw new Error("The server did not return a pending approval. Check the Flask terminal.");
+            }
+
+            currentThreadId = data.thread_id;
+            const plan = data.approval_request.plan;
+
+            outputBox.innerHTML = renderPlan(plan);
+            approvalPlan.innerHTML = renderPlan(plan);
+            approvalModal.classList.remove("hidden");
+            setStatus("Plan generated. Waiting for your approval.");
+        } catch (error) {
+            setStatus(error.message, "error");
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    async function sendApproval(approved) {
+        if (!currentThreadId) {
+            setStatus("No pending approval found. Run the agent again.", "error");
+            return;
+        }
+
+        setBusy(true);
+        setStatus(approved ? "Approved. Executing task..." : "Rejecting the plan...");
+
+        try {
+            const data = await postJSON("/api/approve", {
+                thread_id: currentThreadId,
+                approved: approved
+            });
+
+            approvalModal.classList.add("hidden");
+            currentThreadId = null;
+            renderReport(data.report);
+
+            if (data.status === "rejected") {
+                setStatus("Plan rejected. No tools were executed.", "success");
+            } else {
+                setStatus("Task execution finished. Final report is displayed in tables.", "success");
+            }
+        } catch (error) {
+            setStatus(error.message, "error");
+        } finally {
+            setBusy(false);
+        }
+    }
+</script>
+</body>
+</html>
