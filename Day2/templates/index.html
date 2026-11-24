@@ -1,141 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
 
-const statusBox = document.getElementById("status");
-const outputBox = document.getElementById("output");
+<head>
 
-function esc(value) {
-    return String(value ?? "").replace(/[&<>"']/g, char => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#039;"
-    }[char]));
-}
+    <meta charset="UTF-8">
 
-function status(message, type = "") {
-    statusBox.textContent = message;
-    statusBox.className = "status " + type;
-}
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-function busy(value) {
-    document.querySelectorAll("button").forEach(button => {
-        button.disabled = value;
-    });
-}
+    <title>TaskPilot AI Agent</title>
 
-async function post(url, body) {
-    const response = await fetch(url, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(body)
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-        throw new Error(data.error || "Request failed");
-    }
-
-    return data;
-}
-
-function renderPlan(plan) {
-    let html = `<h3>Goal</h3><p>${esc(plan.goal)}</p>`;
-    html += `<p class="meta">Total time: ${esc(plan.total_estimated_minutes)} minutes</p>`;
-    html += "<h3>Execution Steps</h3>";
-
-    (plan.steps || []).forEach(step => {
-        html += `
-            <div class="task">
-                <strong>${esc(step.step_number)}. ${esc(step.title)}</strong>
-                <div>${esc(step.description)}</div>
-                <div class="meta">Time: ${esc(step.estimated_minutes)} minutes</div>
-                <div class="meta">Expected: ${esc(step.expected_output)}</div>
-            </div>
-        `;
-    });
-
-    html += "<h3>Assumptions</h3><ul>";
-    (plan.assumptions || []).forEach(item => {
-        html += `<li>${esc(item)}</li>`;
-    });
-    html += "</ul><h3>Success Criteria</h3><ul>";
-
-    (plan.success_criteria || []).forEach(item => {
-        html += `<li>${esc(item)}</li>`;
-    });
-
-    html += "</ul>";
-    outputBox.innerHTML = html;
-}
-
-async function generatePlan() {
-    const task = document.getElementById("task").value.trim();
-
-    if (task.length < 3) {
-        return status("Enter at least 3 characters.", "error");
-    }
-
-    busy(true);
-    status("Generating task plan...");
-
-    try {
-        const data = await post("/api/plan", {request: task});
-        renderPlan(data.plan);
-        status("Plan generated successfully.", "success");
-    } catch (error) {
-        status(error.message, "error");
-    } finally {
-        busy(false);
-    }
-}
-
-async function runAgent() {
-    const task = document.getElementById("task").value.trim();
-
-    if (task.length < 3) {
-        return status("Enter at least 3 characters.", "error");
-    }
-
-    busy(true);
-    status("Agent is planning and executing tools...");
-
-    try {
-        const data = await post("/api/run", {request: task});
-
-        renderPlan(data.plan);
-
-        outputBox.innerHTML += "<h3>Executed Tools</h3>";
-
-        if (data.executed_tools.length) {
-            data.executed_tools.forEach(tool => {
-                outputBox.innerHTML += `<div class="task">${esc(tool)}</div>`;
-            });
-        } else {
-            outputBox.innerHTML += "<p>No tools executed.</p>";
+    <style>
+        * {
+            box-sizing: border-box;
         }
 
-        outputBox.innerHTML += "<h3>Tool Outputs</h3>";
+        body {
+            margin: 0;
+            padding: 30px;
+            font-family: Arial, sans-serif;
+            background: #0f172a;
+            color: #f8fafc;
+        }
 
-        data.tool_outputs.forEach(item => {
-            outputBox.innerHTML += `
-                <div class="task">
-                    <strong>${esc(item.tool)}</strong>
-                    <p>${esc(item.output)}</p>
-                </div>
-            `;
-        });
+        .container {
+            max-width: 950px;
+            margin: auto;
+        }
 
-        outputBox.innerHTML += `
-            <h3>Final Review</h3>
-            <div class="task">${esc(data.review)}</div>
-        `;
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
 
-        status("Agent execution completed.", "success");
+        .header h1 {
+            color: #60a5fa;
+            font-size: 36px;
+        }
 
-    } catch (error) {
-        status(error.message, "error");
-    } finally {
-        busy(false);
-    }
-}
+        .header p {
+            color: #94a3b8;
+        }
+
+        .panel {
+            background: #1e293b;
+            padding: 25px;
+            border-radius: 12px;
+            margin-bottom: 22px;
+            border: 1px solid #334155;
+        }
+
+        textarea {
+            width: 100%;
+            padding: 15px;
+            background: #0f172a;
+            color: white;
+            border: 1px solid #475569;
+            border-radius: 8px;
+            font-size: 16px;
+            resize: vertical;
+        }
+
+        textarea:focus {
+            outline: 2px solid #3b82f6;
+        }
+
+        button {
+            padding: 12px 22px;
+            margin: 12px 8px 0 0;
+            background: #2563eb;
+            color: white;
+            border: none;
+            border-radius: 7px;
+            font-size: 15px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #1d4ed8;
+        }
+
+        h2 {
+            color: #60a5fa;
+            margin-bottom: 20px;
+        }
+
+        h3 {
+            color: #93c5fd;
+            margin-top: 22px;
+        }
+
+        .task {
+            background: #334155;
+            padding: 16px;
+            border-radius: 8px;
+            margin: 12px 0;
+        }
+
+        .task strong {
+            color: #f8fafc;
+        }
+
+        .meta {
+            color: #93c5fd;
+            font-size: 14px;
+        }
+
+        .error {
+            background: #7f1d1d;
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .empty {
+            color: #94a3b8;
+        }
+
+        .review {
+            white-space: pre-wrap;
+            line-height: 1.7;
+        }
+
+        li {
+            margin: 10px 0;
+        }
+
+        .footer {
+            text-align: center;
+            color: #64748b;
+            margin-top: 30px;
+            font-size: 13px;
+        }
+
+        @media (max-width: 600px) {
+
+            body {
+                padding: 15px;
+            }
+
+            .header h1 {
+                font-size: 28px;
+            }
+
+            .panel {
+                padding: 18px;
+            }
+
+            button {
+                width: 100%;
+                margin-right: 0;
+            }
+
+        }
+    </style>
+
+</head>
+
+<body>
+
+    <div class="container">
+
+        <!-- HEADER -->
+
+        <div class="header">
+
+            <h1>TaskPilot AI Agent</h1>
+
+            <p>
+                Intelligent Task Planning, Execution
+                and Review using Agentic AI
+            </p>
+
+        </div>
+
+
+        <!-- USER INPUT -->
+
+        <div class="panel">
+
+            <h2>Enter Your Task</h2>
+
+            <form method="POST" action="/">
+
+                <textarea name="request" rows="5"
+                    placeholder="Example: Calculate total cost of 25 products, each costing 500 rupees." required
+                    minlength="3">{{ user_request }}</textarea>
+
+                <button type="submit" name="action" value="plan">
+                    Generate Plan
+                </button>
+
+                <button type="submit" name="action" value="run">
+                    Run Agent
+                </button>
+
+            </form>
+
+        </div>
+
+
+        <!-- ERROR MESSAGE -->
+
+        {% if error %}
+
+        <div class="error">
+
+            <strong>Error:</strong>
+
+            {{ error }}
+
+        </div>
+
+        {% endif %}
+
+
+        {% if result %}
+
+
+        <!-- TASK PLAN -->
+
+        <div class="panel">
+
+            <h2>Task Plan</h2>
+
+            <h3>Goal</h3>
+
+            <p>
+                {{ result.plan.goal }}
+            </p>
+
+            <p class="meta">
+
+                Total Estimated Time:
+
+                {{ result.plan.total_estimated_minutes }}
+
+                minutes
+
+            </p>
+
+
+            <!-- EXECUTION STEPS -->
+
+            <h3>Execution Steps</h3>
+
+            {% for step in result.plan.steps %}
+
+            <div class="task">
+
+                <strong>
+
+                    {{ step.step_number }}.
+
+                    {{ step.title }}
+
+                </strong>
+
+                <p>
+                    {{ step.description }}
+                </p>
+
+                <p class="meta">
+
+                    Estimated Time:
+
+                    {{ step.estimated_minutes }}
+
+                    minutes
+
+                </p>
+
+                <p class="meta">
+
+                    Expected Output:
+
+                    {{ step.expected_output }}
+
+                </p>
+
+            </div>
+
+            {% endfor %}
+
+
+            <!-- ASSUMPTIONS -->
+
+            <h3>Assumptions</h3>
+
+            <ul>
+
+                {% for item in result.plan.assumptions %}
+
+                <li>{{ item }}</li>
+
+                {% else %}
+
+                <li>No assumptions provided.</li>
+
+                {% endfor %}
+
+            </ul>
+
+
+            <!-- SUCCESS CRITERIA -->
+
+            <h3>Success Criteria</h3>
+
+            <ul>
+
+                {% for item in result.plan.success_criteria %}
+
+                <li>{{ item }}</li>
+
+                {% endfor %}
+
+            </ul>
+
+        </div>
+
+
+        <!-- EXECUTION RESULTS -->
+
+        {% if result.review %}
+
+        <div class="panel">
+
+            <h2>Executed Tools</h2>
+
+            {% for tool in result.executed_tools %}
+
+            <div class="task">
+
+                {{ tool }}
+
+            </div>
+
+            {% else %}
+
+            <p class="empty">
+                No tools executed.
+            </p>
+
+            {% endfor %}
+
+
+            <h2>Tool Outputs</h2>
+
+            {% for item in result.tool_outputs %}
+
+            <div class="task">
+
+                <strong>
+                    {{ item.tool }}
+                </strong>
+
+                <p>
+                    {{ item.output }}
+                </p>
+
+            </div>
+
+            {% else %}
+
+            <p class="empty">
+                No tool outputs available.
+            </p>
+
+            {% endfor %}
+
+        </div>
+
+
+        <!-- FINAL REVIEW -->
+
+        <div class="panel">
+
+            <h2>Final Review</h2>
+
+            <div class="review">
+                {{ result.review }}
+            </div>
+
+        </div>
+
+        {% endif %}
+
+        {% endif %}
+
+
+        <!-- FOOTER -->
+
+        <div class="footer">
+
+            TaskPilot AI Agent | Powered by Flask,
+            LangGraph and Groq
+
+        </div>
+
+    </div>
+
+</body>
+
+</html>
