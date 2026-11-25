@@ -17,9 +17,6 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field
 
-# ============================================================
-# 1. CONFIGURATION
-# ============================================================
 load_dotenv()
 
 app = Flask(__name__)
@@ -38,9 +35,6 @@ def get_llm() -> ChatGroq:
     return ChatGroq(model=GROQ_MODEL, temperature=0, api_key=GROQ_API_KEY)
 
 
-# ============================================================
-# 2. PYDANTIC MODELS & STATE
-# ============================================================
 class TaskStep(BaseModel):
     step_number: int
     title: str
@@ -79,9 +73,6 @@ class AgentState(TypedDict, total=False):
     status: str
 
 
-# ============================================================
-# 3. HELPERS
-# ============================================================
 def parse_json_object(content: Any) -> dict:
     if isinstance(content, list):
         text = "\n".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
@@ -97,9 +88,6 @@ def parse_json_object(content: Any) -> dict:
     return value
 
 
-# ============================================================
-# 4. PLANNER
-# ============================================================
 def generate_plan(user_request: str) -> dict:
     llm = get_llm().bind(response_format={"type": "json_object"})
     messages = [
@@ -143,9 +131,6 @@ Return ONLY a valid JSON object matching this schema:
     return TaskPlan.model_validate(normalized).model_dump()
 
 
-# ============================================================
-# 5. TOOLS
-# ============================================================
 @tool
 def calculator(expression: str) -> str:
     """Evaluate a basic arithmetic expression safely (+, -, *, /, **, %)."""
@@ -203,9 +188,6 @@ TOOLS = [calculator, text_analyzer, save_note]
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
 
-# ============================================================
-# 6. TOOL-CALLING EXECUTOR
-# ============================================================
 def execute_request(user_request: str, plan: dict) -> list[dict]:
     llm = get_llm().bind_tools(TOOLS)
     messages = [
@@ -278,10 +260,6 @@ Rules:
         "tables": normalized_tables,
     }).model_dump()
 
-
-# ============================================================
-# 8. LANGGRAPH WORKFLOW (HUMAN-IN-THE-LOOP)
-# ============================================================
 def build_graph():
     def planner_node(state: AgentState):
         return {"plan": generate_plan(state["user_request"]), "status": "plan_created"}
@@ -419,9 +397,5 @@ def create_plan():
         app.logger.exception("Plan generation failed")
         return jsonify({"error": str(exc)}), 500
 
-
-# ============================================================
-# 10. START SERVER
-# ============================================================
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=True)
